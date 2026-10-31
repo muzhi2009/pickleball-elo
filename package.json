@@ -1,0 +1,17 @@
+{
+  "name": "happy-pickleball-elo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "欢乐匹克球社 Elo 排位系统",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "demo": "node tools/seed.js --serve",
+    "seed": "node tools/seed.js",
+    "test": "node tools/run-tests.js",
+    "shots": "node tools/screenshot.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

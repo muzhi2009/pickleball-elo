@@ -1,0 +1,14 @@
+# 运行数据（真实数据，务必不要提交）
+data/
+demo-data/
+.smoke-data/
+.test-data/
+
+# 截图临时文件
+.shots/.profile/
+
+# 日志与系统文件
+*.log
+.DS_Store
+node_modules/
+.shots/

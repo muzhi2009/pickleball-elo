@@ -1,0 +1,9 @@
+# 统一换行符：项目要部署到 Linux，避免 CRLF 让 deploy/*.sh 报 "bad interpreter"
+* text=auto eol=lf
+
+# 明确二进制类型
+*.png binary
+*.ico binary
+*.jpg binary
+*.woff binary
+*.woff2 binary
