@@ -9,7 +9,8 @@
     "demo": "node tools/seed.js --serve",
     "seed": "node tools/seed.js",
     "test": "node tools/run-tests.js",
-    "shots": "node tools/screenshot.js"
+    "shots": "node tools/screenshot.js",
+    "game": "node tools/game-test.js"
   },
   "engines": {
     "node": ">=20"

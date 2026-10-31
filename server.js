@@ -3,6 +3,7 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const store = require('./lib/store');
 const elo = require('./lib/elo');
@@ -170,6 +171,75 @@ function commit() {
   elo.recompute(db);
   store.save(db);
 }
+
+/* ---------- 小游戏：对局凭证与排行榜 ---------- */
+
+const GAME_TOKEN_TTL = 6 * 3600 * 1000;   // 凭证有效期
+const GAME_MIN_MS = 8000;                 // 一局至少这么久，挡掉瞬间刷分
+const GAME_MAX_SCORE = 99999;             // 分数上限，超出视为异常
+const usedGameTokens = new Map();         // nonce -> 使用时间，防重放
+
+function signGameToken(payload) {
+  return crypto.createHmac('sha256', store.secret()).update(payload).digest('base64url');
+}
+
+function makeGameToken(user) {
+  const payload = Buffer.from(JSON.stringify({
+    uid: user.id,
+    iat: Date.now(),
+    n: crypto.randomBytes(9).toString('base64url')
+  })).toString('base64url');
+  return payload + '.' + signGameToken(payload);
+}
+
+function readGameToken(token) {
+  if (!token || typeof token !== 'string' || token.length > 600) return null;
+  const index = token.lastIndexOf('.');
+  if (index <= 0) return null;
+  const payload = token.slice(0, index);
+  const signature = token.slice(index + 1);
+  const good = signGameToken(payload);
+  if (signature.length !== good.length) return null;
+  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(good))) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!data || !data.uid || !data.n || typeof data.iat !== 'number') return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function consumeGameToken(nonce) {
+  const now = Date.now();
+  if (usedGameTokens.size > 4000) {
+    for (const [key, at] of usedGameTokens) {
+      if (now - at > GAME_TOKEN_TTL) usedGameTokens.delete(key);
+    }
+  }
+  if (usedGameTokens.has(nonce)) return false;
+  usedGameTokens.set(nonce, now);
+  return true;
+}
+
+function gameTop(limit = 10, meId = null) {
+  const rank = [];
+  for (const row of db.gameScores) {
+    if (!row || !(row.best > 0)) continue;
+    const user = db.users.find((u) => u.id === row.userId);
+    if (!user || user.status !== 'active') continue;
+    rank.push({ name: user.nickname, best: row.best, bestAt: row.bestAt || 0, me: user.id === meId });
+  }
+  rank.sort((a, b) => b.best - a.best || a.bestAt - b.bestAt);
+  return rank.slice(0, limit);
+}
+
+function sendJson(res, status, data) {
+  send(res, status, JSON.stringify(data), 'application/json; charset=utf-8', {
+    'Cache-Control': 'no-store'
+  });
+}
+
 
 function normalizeNickname(value) {
   return String(value || '').trim().replace(/\s+/g, ' ');
@@ -656,6 +726,81 @@ async function handle(req, res) {
       },
       history: history.slice(0, 20),
       pending: db.matches.filter((m) => m.disputed && m.dispute && m.dispute.by === req.user.id)
+    });
+  }
+
+  /* ---------- 小游戏 ---------- */
+
+  if (pathname === '/game' && req.method === 'GET') {
+    const mine = req.user ? db.gameScores.find((s) => s.userId === req.user.id) : null;
+    return renderPage(req, res, views.gamePage, {
+      best: mine ? mine.best : 0,
+      plays: mine ? mine.plays : 0,
+      top: gameTop(10, req.user ? req.user.id : null)
+    });
+  }
+
+  if (pathname === '/game/start' && req.method === 'POST') {
+    if (!req.user) return sendJson(res, 401, { ok: false, error: '请先登录' });
+    if (!rateLimit('game-start:' + req.user.id, 120, 3600 * 1000)) {
+      return sendJson(res, 429, { ok: false, error: '开得有点勤，歇一会儿' });
+    }
+    return sendJson(res, 200, { ok: true, token: makeGameToken(req.user) });
+  }
+
+  if (pathname === '/game/score' && req.method === 'POST') {
+    if (!req.user) return sendJson(res, 401, { ok: false, error: '登录后才能上榜' });
+    if (!rateLimit('game-score:' + req.user.id, 80, 3600 * 1000)) {
+      return sendJson(res, 429, { ok: false, error: '提交太频繁了，先歇会儿' });
+    }
+
+    const body = await readForm(req, 4000);
+    const token = String(body.get('token') || '');
+    const score = Math.round(Number(body.get('score')));
+    // 客户端上报的本局时长，没传就当未知（NaN），不要当成 0
+    const rawMs = body.get('ms');
+    const elapsed = rawMs === null || rawMs === '' ? NaN : Math.round(Number(rawMs));
+
+    const payload = readGameToken(token);
+    if (!payload || payload.uid !== req.user.id) {
+      return sendJson(res, 400, { ok: false, error: '对局凭证无效，刷新页面再来一局' });
+    }
+    const age = Date.now() - payload.iat;
+    if (age > GAME_TOKEN_TTL) {
+      return sendJson(res, 400, { ok: false, error: '这一局放太久，凭证过期了' });
+    }
+    if (age < GAME_MIN_MS || (Number.isFinite(elapsed) && elapsed < GAME_MIN_MS)) {
+      return sendJson(res, 400, { ok: false, error: '这局结束得太快，成绩不算数' });
+    }
+    if (!consumeGameToken(payload.n)) {
+      return sendJson(res, 409, { ok: false, error: '这局的成绩已经提交过了' });
+    }
+    if (!Number.isFinite(score) || score <= 0 || score > GAME_MAX_SCORE) {
+      return sendJson(res, 400, { ok: false, error: '分数不太对，这局没记上' });
+    }
+
+    let row = db.gameScores.find((s) => s.userId === req.user.id);
+    if (!row) {
+      row = { userId: req.user.id, best: 0, bestAt: 0, plays: 0, lastScore: 0, lastAt: 0 };
+      db.gameScores.push(row);
+    }
+    const isNewBest = score > (row.best || 0);
+    row.plays = (row.plays || 0) + 1;
+    row.lastScore = score;
+    row.lastAt = Date.now();
+    if (isNewBest) {
+      row.best = score;
+      row.bestAt = Date.now();
+    }
+    store.save(db);
+
+    return sendJson(res, 200, {
+      ok: true,
+      score,
+      best: row.best,
+      plays: row.plays,
+      isNewBest,
+      top: gameTop(10, req.user.id)
     });
   }
 

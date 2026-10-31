@@ -1,0 +1,365 @@
+/* 合成大匹克球 —— 页面样式（复用 style.css 的设计变量） */
+
+.game-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 20px;
+  align-items: start;
+  padding-top: 18px;
+  padding-bottom: 32px;
+}
+
+.game-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.game-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.game-head h1 {
+  font-size: 1.35rem;
+}
+
+.game-stats {
+  display: flex;
+  gap: 8px;
+}
+
+.stat-pill {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  padding: 3px 10px 4px;
+  min-width: 66px;
+  background: var(--soft);
+}
+
+.stat-pill span {
+  font-size: 0.68rem;
+  color: var(--muted);
+  line-height: 1.3;
+  letter-spacing: 0.04em;
+}
+
+.stat-pill strong {
+  font-size: 1.05rem;
+  font-weight: 800;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.board-shell {
+  position: relative;
+  border: 1.5px solid var(--line);
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--soft);
+  box-shadow: var(--shadow);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  /* 整块棋盘要在首屏完整可见：高度受视口限制，宽度按 360:560 反推 */
+  width: 100%;
+  max-width: calc((100vh - 258px) * 360 / 560);
+  max-width: calc((100dvh - 258px) * 360 / 560);
+  margin: 0 auto;
+}
+
+#gameCanvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 360 / 560;
+  touch-action: none;
+  cursor: pointer;
+}
+
+.game-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  min-height: 40px;
+}
+
+.game-hint > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hint-keys { display: none; }
+
+/* 只有真正的宽屏鼠标环境才提示键盘/鼠标操作，触屏一律用文案 A */
+@media (min-width: 861px) {
+  .hint-touch { display: none; }
+  .hint-keys { display: inline; }
+}
+
+.next-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+#nextBall {
+  width: 40px;
+  height: 40px;
+  display: block;
+}
+
+.iconbtn {
+  border: 1.5px solid var(--line);
+  background: var(--panel);
+  color: var(--fg);
+  border-radius: 10px;
+  width: 34px;
+  height: 34px;
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.iconbtn:hover {
+  background: var(--soft);
+}
+
+/* 结束遮罩 */
+.game-over {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  padding: 20px;
+  animation: fade-in 0.25s ease;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.over-card {
+  text-align: center;
+  background: var(--panel);
+  border: 1.5px solid var(--line);
+  border-radius: 18px;
+  padding: 22px 24px 20px;
+  width: min(280px, 100%);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.16);
+}
+
+.over-card h2 {
+  font-size: 1.05rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.over-score {
+  font-size: 3rem;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  margin: 4px 0 2px;
+}
+
+.over-sub {
+  font-size: 0.84rem;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
+.over-sub strong {
+  color: var(--fg);
+}
+
+.over-note {
+  font-size: 0.78rem;
+  color: var(--muted);
+  min-height: 1.2em;
+  margin-bottom: 12px;
+}
+
+.over-note-new { color: #d9820a; font-weight: 700; }
+.over-note-err { color: #c0392b; }
+
+.btn-primary {
+  width: 100%;
+  border: none;
+  border-radius: 11px;
+  background: var(--inv);
+  color: var(--inv-fg);
+  font-size: 0.95rem;
+  font-weight: 700;
+  padding: 11px 16px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.btn-primary:hover {
+  opacity: 0.88;
+}
+
+/* 侧栏 */
+.game-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.panel {
+  border: 1.5px solid var(--line);
+  border-radius: 14px;
+  padding: 14px 16px 16px;
+  background: var(--panel);
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.panel-head h2 {
+  font-size: 0.95rem;
+}
+
+.rank-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+.rank-table th {
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  padding: 0 0 6px;
+  border-bottom: 1.5px solid var(--line);
+}
+
+.rank-table th:last-child,
+.rank-table td:last-child {
+  text-align: right;
+}
+
+.rank-table td {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.rank-table tr:last-child td { border-bottom: none; }
+
+.rank-no {
+  width: 34px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.rank-name {
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rank-score {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.rank-me td {
+  color: var(--fg);
+  font-weight: 700;
+  background: var(--soft);
+}
+
+.rank-me .rank-no { color: var(--fg); }
+
+.rank-empty {
+  text-align: center !important;
+  color: var(--muted);
+  padding: 18px 0 !important;
+}
+
+.rules {
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.65;
+  margin: 0;
+  padding-left: 1.1em;
+}
+
+.rules li { margin-bottom: 3px; }
+
+.rules b { color: var(--fg); font-weight: 700; }
+
+.guest-note {
+  font-size: 0.8rem;
+  border: 1.5px dashed var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: var(--muted);
+}
+
+.guest-note a {
+  color: var(--fg);
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+/* 手机 */
+@media (max-width: 860px) {
+  .game-wrap {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    padding-top: 12px;
+  }
+
+  .game-head h1 { font-size: 1.2rem; }
+
+  .board-shell {
+    /* 手机竖屏基本吃满宽度，但要给视口高度留余量，横屏时不至于超出 */
+    max-width: min(420px, calc((100dvh - 268px) * 360 / 560));
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .game-hint { justify-content: space-between; }
+
+  .game-side {
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 380px) {
+  .stat-pill { min-width: 58px; padding: 2px 8px 3px; }
+  .stat-pill strong { font-size: 0.95rem; }
+  .game-head h1 { font-size: 1.05rem; }
+}

@@ -339,6 +339,72 @@ async function main() {
   const homeAnnounce = await new Client().get('/');
   ok('公告显示在首页', homeAnnounce.text.includes('周三晚 7 点老地方'));
 
+  console.log('\n== 17. 小游戏：最高分榜 ==');
+  const anonGame = new Client();
+  const anonPage = await anonGame.get('/game');
+  eq('未登录也能打开游戏页', anonPage.status, 200);
+  ok('页面加载了物理引擎', anonPage.text.includes('/static/matter.min.js'));
+  ok('页面加载了游戏脚本', anonPage.text.includes('/static/game.js'));
+  ok('页面带排行榜容器', anonPage.text.includes('id="rankBody"'));
+  ok('未登录提示不计入榜单', anonPage.text.includes('成绩不会上榜'));
+
+  const anonStart = await anonGame.post('/game/start', {});
+  eq('未登录拿不到对局凭证', anonStart.status, 401);
+
+  // 一局一张凭证，且凭证有最短时长要求，所以先一次性签好后面要用的
+  const tokens = [];
+  for (let i = 0; i < 4; i++) {
+    tokens.push(JSON.parse((await member.post('/game/start', {})).text).token);
+  }
+  const memberToken = tokens[0];
+  const adminToken = JSON.parse((await admin.post('/game/start', {})).text).token;
+  ok('登录后签发了对局凭证', typeof memberToken === 'string' && memberToken.split('.').length === 2);
+  ok('每次开局凭证都不同', new Set(tokens).size === tokens.length);
+
+  const forged = await member.post('/game/score', { token: 'abc.def', score: '500' });
+  eq('伪造凭证被拒', forged.status, 400);
+
+  const tooFast = await member.post('/game/score', { token: memberToken, score: '500' });
+  eq('不满 8 秒的对局被拒', tooFast.status, 400);
+
+  console.log('  … 等待 9 秒，让对局凭证站稳');
+  await new Promise((resolve) => setTimeout(resolve, 9000));
+
+  const good = await member.post('/game/score', { token: memberToken, score: '260', ms: '96000' });
+  eq('正常提交返回 200', good.status, 200);
+  const goodJson = JSON.parse(good.text);
+  ok('首局记为最高分', goodJson.isNewBest === true && goodJson.best === 260,
+    JSON.stringify(goodJson));
+
+  const replay = await member.post('/game/score', { token: memberToken, score: '260' });
+  eq('同一局不能重复提交', replay.status, 409);
+
+  const token2 = tokens[1];
+  const lower = JSON.parse((await member.post('/game/score', { token: token2, score: '80', ms: '61000' })).text);
+  ok('低分不覆盖最高分', lower.isNewBest === false && lower.best === 260);
+
+  const token3 = tokens[2];
+  const absurd = await member.post('/game/score', { token: token3, score: '999999' });
+  eq('离谱分数被拒', absurd.status, 400);
+
+  const adminScore = JSON.parse((await admin.post('/game/score', { token: adminToken, score: '430', ms: '142000' })).text);
+  ok('管理员成绩也记上', adminScore.best === 430, JSON.stringify(adminScore));
+
+  db = await readDb();
+  const adminId = db.users.find((u) => u.role === 'admin').id;
+  const adminNick = db.users.find((u) => u.id === adminId).nickname;
+  const memberId = db.users.find((u) => u.nickname === '小李').id;
+  const memberRow = db.gameScores.find((s) => s.userId === memberId);
+  ok('游戏成绩落在独立表里', !!memberRow && memberRow.best === 260 && memberRow.plays === 2,
+    memberRow ? `best=${memberRow.best} plays=${memberRow.plays}` : '没有记录');
+  ok('游戏分数没有污染 Elo', typeof db.ratings[memberId].singles.rating === 'number');
+
+  const rankPage = await member.get('/game');
+  const ranked = [...rankPage.text.matchAll(/class="rank-name">([^<]*)</g)].map((m) => m[1]);
+  ok('榜单按最高分降序排列', ranked[0] === adminNick, ranked.join(' > '));
+  ok('榜单包含全部上榜成员', ranked.length === 2, ranked.join('、'));
+  ok('自己的那一行有高亮', rankPage.text.includes('class="rank-me"'));
+
   console.log('\n========== 结果 ==========');
   console.log(`通过 ${pass} 项，失败 ${fail} 项`);
   if (fail) {

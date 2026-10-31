@@ -3,6 +3,7 @@ data/
 demo-data/
 .smoke-data/
 .test-data/
+.game-test/
 
 # 截图临时文件
 .shots/.profile/
