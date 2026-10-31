@@ -197,9 +197,16 @@ journalctl -u pickleball -n 100 --no-pager   # 查看日志
 更新代码：
 
 ```bash
-# 上传新版本后
-sudo bash /opt/pickleball/deploy/install.sh
+# 把新包上传解压后，原地升级（只换代码，保留 data 和 backup，不动端口配置）
+sudo bash /path/to/pickleball/deploy/upgrade.sh
+
+# 如果装在别的目录
+sudo APP_DIR=/srv/pickleball bash /path/to/pickleball/deploy/upgrade.sh
 ```
+
+`upgrade.sh` 会先把现有目录完整备份成 `/opt/pickleball.bak-<时间戳>`，跑完语法自检、重启服务、再打一遍本地健康检查。出问题按它打印的提示一键回退。
+
+> `install.sh` 适合全新安装（会按 `MODE` 重写 systemd 单元）；已经跑起来的站点升级用 `upgrade.sh`，不会碰你的端口设置。
 
 ---
 
