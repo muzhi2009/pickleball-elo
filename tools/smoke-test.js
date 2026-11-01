@@ -6,8 +6,9 @@
  *   PORT=3210 DATA_DIR=./.smoke-data node server.js
  *   BASE=http://127.0.0.1:3210 node tools/smoke-test.js
  *
- * 覆盖：初始化 / 注册 / 审核 / 单打 / 双打 / 比分修正 / 防刷 / 排行榜 /
- *      比赛详情 / 申诉 / 裁决 / 改判重算 / 作废 / 导出 / 页面可访问性
+ * 覆盖：初始化 / 注册 / 审核 / 录入待审 / 管理员与审核员审核 / 自审拦截 /
+ *      驳回重提 / 批量通过 / 单打 / 双打 / 防刷 / 排行榜 / 申诉 / 改判 /
+ *      作废 / 导出 / 页面可访问性 / 小游戏
  */
 
 const BASE = process.env.BASE || 'http://127.0.0.1:3210';
@@ -62,11 +63,17 @@ class Client {
     return { status: res.status, location: res.headers.get('location'), text: await res.text() };
   }
   async post(path, form) {
+    // 支持数组值（批量操作要一次提交多个 ids）
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(form)) {
+      if (Array.isArray(value)) value.forEach((item) => params.append(key, item));
+      else params.append(key, value);
+    }
     const res = await fetch(BASE + path, {
       method: 'POST',
       redirect: 'manual',
       headers: { cookie: this.header(), 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams(form).toString()
+      body: params.toString()
     });
     this.store(res);
     return { status: res.status, location: res.headers.get('location'), text: await res.text() };
@@ -79,6 +86,10 @@ const ids = {};
 
 function form(over) {
   return { type: 'singles', detail: '0', winner: '1', playedAt: '', ...over };
+}
+
+function matchIdFrom(res) {
+  return decodeURIComponent((res.location || '').split('/matches/')[1] || '');
 }
 
 async function main() {
@@ -107,14 +118,14 @@ async function main() {
   r = await admin.get('/admin/users');
   for (const n of names) ok(`后台能看到待审核 ${n}`, r.text.includes(n));
 
-  // 用后台页面里的 id 审核
-  const pending = [...r.text.matchAll(/\/admin\/users\/(u_[0-9a-f]+)/g)].map((m) => m[1]);
-  const uniq = [...new Set(pending)];
-  eq('拿到 4 个待审核用户', uniq.length, 4);
-  for (let i = 0; i < uniq.length; i++) {
-    await admin.post('/admin/users/' + uniq[i], { action: 'approve' });
-    ids[names[i]] = uniq[i];
+  let db = await readDb();
+  const pendingUsers = db.users.filter((u) => u.status === 'pending');
+  eq('拿到 4 个待审核用户', pendingUsers.length, 4);
+  for (const u of pendingUsers) {
+    await admin.post('/admin/users/' + u.id, { action: 'approve' });
+    ids[u.nickname] = u.id;
   }
+  const adminId = db.users.find((u) => u.role === 'admin').id;
 
   r = await member.post('/login', { nickname: '小李', password: 'test1234' });
   ok('审核后可登录', isRedirect(r.status), 'HTTP ' + r.status);
@@ -123,7 +134,7 @@ async function main() {
   eq('/me 可访问', mePage.status, 200);
   ok('/me 显示初始分 1500', mePage.text.includes('1500'));
 
-  console.log('\n== 3. 单打录入 ==');
+  console.log('\n== 3. 单打录入：先进待审 ==');
   const beforeSingles = await readRatings();
   r = await member.post('/record', form({
     type: 'singles',
@@ -136,13 +147,38 @@ async function main() {
     playedAt: localNow()
   }));
   ok('单打录入成功', isRedirect(r.status), 'HTTP ' + r.status);
-  const singlesId = decodeURIComponent((r.location || '').split('/matches/')[1] || '');
+  const singlesId = matchIdFrom(r);
   ok('跳转到比赛详情', !!singlesId, r.location || '');
 
-  let db = await readDb();
+  db = await readDb();
   let m = db.matches.find((x) => x.id === singlesId);
   ok('比赛已入库', !!m);
   eq('比赛类型为单打', m.type, 'singles');
+  eq('新录入的比赛是待审核', m.status, 'pending');
+  eq('待审核比赛不产生 Elo 变化', m.changes.length, 0);
+
+  const afterSubmit = await readRatings();
+  eq('待审核时赢家分数没动', afterSubmit[ids['小李']].singles.rating, beforeSingles[ids['小李']].singles.rating);
+  eq('待审核时场次没动', afterSubmit[ids['小李']].singles.matches, beforeSingles[ids['小李']].singles.matches);
+
+  const pendingDetail = await member.get('/matches/' + singlesId);
+  eq('录入人能打开待审详情', pendingDetail.status, 200);
+  ok('详情显示待审核标记', pendingDetail.text.includes('待审核'));
+  ok('详情说明暂不计分', pendingDetail.text.includes('还没通过审核'));
+  ok('录入人能看到撤销按钮', pendingDetail.text.includes('撤销这场提交'));
+
+  const reviewPage = await admin.get('/admin/review');
+  eq('审核队列可访问', reviewPage.status, 200);
+  ok('队列里能勾选这场', reviewPage.text.includes(`value="${singlesId}"`));
+
+  r = await admin.post('/admin/review/' + singlesId, { action: 'approve' });
+  ok('管理员通过审核', isRedirect(r.status), 'HTTP ' + r.status);
+
+  db = await readDb();
+  m = db.matches.find((x) => x.id === singlesId);
+  eq('审核后变为已生效', m.status, 'active');
+  eq('审核人记录正确', m.review.by, adminId);
+  eq('自审标记为 false（管理员审别人录的）', m.review.self, false);
   const sum = m.changes.reduce((s, c) => s + c.delta, 0);
   eq('单打零和（加分=扣分）', sum, 0);
   ok('赢家加分为正', m.changes.find((c) => c.userId === ids['小李']).delta > 0);
@@ -151,8 +187,8 @@ async function main() {
     Math.abs(m.changes.find((c) => c.userId === ids['小李']).delta) <= 26,
     String(m.changes.find((c) => c.userId === ids['小李']).delta));
   const afterSingles = await readRatings();
-  eq('小李单打分上涨', afterSingles[ids['小李']].singles.rating > 1500, true);
-  eq('小王单打分下降', afterSingles[ids['小王']].singles.rating < 1500, true);
+  eq('审核后小李单打分上涨', afterSingles[ids['小李']].singles.rating > 1500, true);
+  eq('审核后小王单打分下降', afterSingles[ids['小王']].singles.rating < 1500, true);
   eq('单打赢家场次 +1', afterSingles[ids['小李']].singles.matches, beforeSingles[ids['小李']].singles.matches + 1);
 
   console.log('\n== 4. 防刷分（24 小时内同一对阵） ==');
@@ -160,9 +196,15 @@ async function main() {
     type: 'singles', t1p1: ids['小李'], t2p1: ids['小王'], winner: '1', detail: '0', playedAt: ''
   }));
   ok('重复对阵录入成功', isRedirect(r.status), 'HTTP ' + r.status);
-  const repeatId = decodeURIComponent((r.location || '').split('/matches/')[1] || '');
+  const repeatId = matchIdFrom(r);
+  db = await readDb();
+  eq('第二场同样先待审', db.matches.find((x) => x.id === repeatId).status, 'pending');
+  eq('第二场待审时也没有 Elo 变化', db.matches.find((x) => x.id === repeatId).changes.length, 0);
+
+  await admin.post('/admin/review/' + repeatId, { action: 'approve' });
   db = await readDb();
   const repeatMatch = db.matches.find((x) => x.id === repeatId);
+  eq('第二场审核后生效', repeatMatch.status, 'active');
   const repeatDelta = Math.abs(repeatMatch.changes.find((c) => c.userId === ids['小李']).delta);
   ok('重复对阵涨幅减半', repeatDelta <= 12, String(repeatDelta));
 
@@ -174,7 +216,10 @@ async function main() {
     winner: '1', detail: '1', score1: '11', score2: '5', playedAt: localNow()
   }));
   ok('双打录入成功', isRedirect(r.status), 'HTTP ' + r.status);
-  const doublesId = decodeURIComponent((r.location || '').split('/matches/')[1] || '');
+  const doublesId = matchIdFrom(r);
+  db = await readDb();
+  eq('双打也是待审核', db.matches.find((x) => x.id === doublesId).status, 'pending');
+  await admin.post('/admin/review/' + doublesId, { action: 'approve' });
   db = await readDb();
   const dm = db.matches.find((x) => x.id === doublesId);
   eq('比赛类型为双打', dm.type, 'doubles');
@@ -184,7 +229,125 @@ async function main() {
   eq('同队两人加同分', t1a, t1b);
   ok('大比分胜出有放大（11-5 涨幅 > 20）', t1a > 20, String(t1a));
 
-  console.log('\n== 6. 校验与错误处理 ==');
+  console.log('\n== 6. 审核员：分配与权限边界 ==');
+  r = await admin.post('/admin/users/' + ids['小王'], { action: 'setRole', role: 'reviewer' });
+  ok('管理员可以指派审核员', isRedirect(r.status), 'HTTP ' + r.status);
+  db = await readDb();
+  eq('小王角色变为审核员', db.users.find((u) => u.id === ids['小王']).role, 'reviewer');
+
+  const reviewer = new Client();
+  await reviewer.post('/login', { nickname: '小王', password: 'test1234' });
+  const revQueue = await reviewer.get('/admin/review');
+  eq('审核员能打开审核队列', revQueue.status, 200);
+  const revUsers = await reviewer.get('/admin/users');
+  eq('审核员进不了成员管理', revUsers.status, 403);
+  const revSettings = await reviewer.get('/admin/settings');
+  eq('审核员进不了规则设置', revSettings.status, 403);
+
+  const plain = new Client();
+  await plain.post('/login', { nickname: '小张', password: 'test1234' });
+  const plainQueue = await plain.get('/admin/review');
+  eq('普通成员进不了审核队列', plainQueue.status, 403);
+
+  // 审核员自己录一场，不能自己通过
+  r = await reviewer.post('/record', form({
+    type: 'singles', t1p1: ids['小王'], t2p1: ids['小陈'], winner: '1', detail: '1', score1: '11', score2: '9', playedAt: localNow()
+  }));
+  const selfId = matchIdFrom(r);
+  ok('审核员可以录入比赛', !!selfId, r.location || '');
+  await reviewer.post('/admin/review/' + selfId, { action: 'approve' });
+  db = await readDb();
+  eq('审核员不能通过自己录的比赛', db.matches.find((x) => x.id === selfId).status, 'pending');
+
+  const selfDetail = await reviewer.get('/matches/' + selfId);
+  ok('页面提示需要管理员审核', selfDetail.text.includes('需要另一位审核者或管理员'));
+
+  await admin.post('/admin/review/' + selfId, { action: 'approve' });
+  db = await readDb();
+  eq('管理员可以审审核员录的比赛', db.matches.find((x) => x.id === selfId).status, 'active');
+
+  // 审核员可以审别人录的
+  r = await plain.post('/record', form({
+    type: 'singles', t1p1: ids['小张'], t2p1: ids['小李'], winner: '2', detail: '1', score1: '6', score2: '11', playedAt: localNow()
+  }));
+  const otherId = matchIdFrom(r);
+  await reviewer.post('/admin/review/' + otherId, { action: 'approve' });
+  db = await readDb();
+  eq('审核员能通过别人录的比赛', db.matches.find((x) => x.id === otherId).status, 'active');
+
+  // 管理员可以审自己录的（自审留痕）
+  r = await admin.post('/record', form({
+    type: 'singles', t1p1: ids['小陈'], t2p1: ids['小张'], winner: '1', detail: '0', playedAt: localNow()
+  }));
+  const adminOwnId = matchIdFrom(r);
+  await admin.post('/admin/review/' + adminOwnId, { action: 'approve' });
+  db = await readDb();
+  const adminOwn = db.matches.find((x) => x.id === adminOwnId);
+  eq('管理员可以审自己录的比赛', adminOwn.status, 'active');
+  eq('自审被标记出来', adminOwn.review.self, true);
+
+  console.log('\n== 7. 驳回与重新提交 ==');
+  r = await plain.post('/record', form({
+    type: 'singles', t1p1: ids['小李'], t2p1: ids['小张'], winner: '1', detail: '1', score1: '11', score2: '3', playedAt: localNow()
+  }));
+  const rejectId = matchIdFrom(r);
+
+  // 不写理由的驳回不生效
+  await admin.post('/admin/review/' + rejectId, { action: 'reject', note: '' });
+  db = await readDb();
+  eq('不写原因的驳回不生效', db.matches.find((x) => x.id === rejectId).status, 'pending');
+
+  await admin.post('/admin/review/' + rejectId, { action: 'reject', note: '比分记反了，实际 A 队 3 分' });
+  db = await readDb();
+  const rejected = db.matches.find((x) => x.id === rejectId);
+  eq('驳回后状态为 rejected', rejected.status, 'rejected');
+  eq('驳回的比赛不计分', rejected.changes.length, 0);
+  ok('驳回原因被保存', rejected.review.note.includes('比分记反'));
+
+  const rejectDetail = await plain.get('/matches/' + rejectId);
+  ok('详情显示驳回原因', rejectDetail.text.includes('比分记反'));
+  ok('录入人看到重新提交按钮', rejectDetail.text.includes('重新提交'));
+
+  await plain.post('/matches/' + rejectId + '/resubmit', {});
+  db = await readDb();
+  eq('重新提交后回到待审核', db.matches.find((x) => x.id === rejectId).status, 'pending');
+
+  // 撤销
+  r = await plain.post('/matches/' + rejectId + '/withdraw', {});
+  ok('可以撤销自己的待审提交', isRedirect(r.status), 'HTTP ' + r.status);
+  db = await readDb();
+  ok('撤销后记录被删除', !db.matches.find((x) => x.id === rejectId));
+
+  console.log('\n== 8. 批量通过 ==');
+  const batchIds = [];
+  for (let i = 0; i < 3; i++) {
+    r = await member.post('/record', form({
+      type: 'singles', t1p1: ids['小李'], t2p1: ids['小陈'], winner: i === 1 ? '1' : '2', detail: '0',
+      playedAt: localNow(-1 * (i + 1))
+    }));
+    batchIds.push(matchIdFrom(r));
+  }
+  eq('攒下 3 场待审核', batchIds.filter((id) => id).length, 3);
+  r = await admin.post('/admin/review/batch', { ids: batchIds });
+  ok('批量通过请求成功', isRedirect(r.status), 'HTTP ' + r.status);
+  db = await readDb();
+  const batchStates = batchIds.map((id) => db.matches.find((x) => x.id === id).status);
+  eq('3 场全部变为已生效', batchStates.filter((s) => s === 'active').length, 3);
+
+  // 审核员批量时，自己录的会被跳过
+  const mixed = [];
+  for (let i = 0; i < 2; i++) {
+    r = await reviewer.post('/record', form({
+      type: 'singles', t1p1: ids['小王'], t2p1: ids['小张'], winner: '1', detail: '0',
+      playedAt: localNow(-1 * (i + 3))
+    }));
+    mixed.push(matchIdFrom(r));
+  }
+  await reviewer.post('/admin/review/batch', { ids: mixed });
+  db = await readDb();
+  eq('审核员批量时自己录的仍待审', db.matches.find((x) => x.id === mixed[0]).status, 'pending');
+
+  console.log('\n== 9. 校验与错误处理 ==');
   r = await member.post('/record', form({
     type: 'doubles', t1p1: ids['小李'], t1p2: ids['小王'], t2p1: ids['小张'], t2p2: ids['小陈'],
     winner: '2', detail: '1', score1: '11', score2: '5'
@@ -197,7 +360,7 @@ async function main() {
   }));
   eq('同一人重复上场被拒绝', r.status, 400);
 
-  console.log('\n== 7. 排行榜与列表页 ==');
+  console.log('\n== 10. 排行榜与列表页 ==');
   const home = await new Client().get('/');
   eq('排行榜公开可访问', home.status, 200);
   ok('排行榜显示选手', home.text.includes('小李') && home.text.includes('小张'));
@@ -206,12 +369,25 @@ async function main() {
   ok('双打榜有双打排名', homeDoubles.text.includes('双打'));
   const list = await new Client().get('/matches');
   eq('比赛列表可访问', list.status, 200);
+  ok('公开列表不显示待审比赛', !list.text.includes('待审核'));
   const detail = await member.get('/matches/' + singlesId);
   eq('比赛详情可访问', detail.status, 200);
   ok('详情显示比分', detail.text.includes('11') && detail.text.includes('7'));
   ok('详情显示 Elo 变化', detail.text.includes('Elo'));
 
-  console.log('\n== 8. 申诉与裁决 ==');
+  // 待审比赛对无关成员不可见
+  const hidden = await admin.post('/record', form({
+    type: 'singles', t1p1: ids['小陈'], t2p1: ids['小王'], winner: '1', detail: '0', playedAt: localNow()
+  }));
+  const hiddenId = matchIdFrom(hidden);
+  const outsider = await plain.get('/matches/' + hiddenId);
+  eq('待审比赛对无关成员返回 404', outsider.status, 404);
+  const owner = await admin.get('/matches/' + hiddenId);
+  eq('待审比赛对录入人可见', owner.status, 200);
+  const anonHidden = await new Client().get('/matches/' + hiddenId);
+  ok('未登录看不到待审比赛', anonHidden.status !== 200, 'HTTP ' + anonHidden.status);
+
+  console.log('\n== 11. 申诉与裁决 ==');
   const wang = new Client();
   await wang.post('/login', { nickname: '小王', password: 'test1234' });
   const ratingBeforeDispute = (await readRatings())[ids['小李']].singles.rating;
@@ -229,7 +405,7 @@ async function main() {
   db = await readDb();
   ok('裁决后争议标记清除', db.matches.find((x) => x.id === singlesId).disputed === false);
 
-  console.log('\n== 9. 改判与全量重算 ==');
+  console.log('\n== 12. 改判与全量重算 ==');
   const editPage = await admin.get(`/admin/matches/${singlesId}/edit`);
   eq('改判页面可访问', editPage.status, 200);
   r = await admin.post(`/admin/matches/${singlesId}/edit`, form({
@@ -243,7 +419,7 @@ async function main() {
   const consistent = recomputeConsistent(db);
   ok('重算结果与库中分数一致', consistent.ok, consistent.detail);
 
-  console.log('\n== 10. 作废比赛 ==');
+  console.log('\n== 13. 作废比赛 ==');
   r = await admin.post(`/admin/matches/${repeatId}/void`, {});
   ok('作废成功', isRedirect(r.status), 'HTTP ' + r.status);
   db = await readDb();
@@ -252,40 +428,44 @@ async function main() {
   const afterVoid = recomputeConsistent(db);
   ok('作废后重算仍一致', afterVoid.ok, afterVoid.detail);
 
-  console.log('\n== 11. 导出与重算按钮 ==');
+  console.log('\n== 14. 导出与重算按钮 ==');
   const csv = await admin.get('/admin/export.csv?type=players');
   eq('导出选手 CSV', csv.status, 200);
   ok('CSV 含表头', csv.text.split('\n')[0].includes('昵称'));
+  ok('CSV 区分审核员角色', csv.text.includes('审核员'));
   const csv2 = await admin.get('/admin/export.csv?type=matches');
   eq('导出比赛 CSV', csv2.status, 200);
+  ok('比赛 CSV 含审核状态列', csv2.text.split('\n')[0].includes('审核状态'));
   r = await admin.post('/admin/recompute', {});
   ok('手动重算成功', isRedirect(r.status), 'HTTP ' + r.status);
 
-  console.log('\n== 12. 全站页面可访问性 ==');
+  console.log('\n== 15. 全站页面可访问性 ==');
   const pages = ['/', '/matches', '/login', '/register', '/me', '/record',
-    '/admin', '/admin/users', '/admin/matches', '/admin/disputes', '/admin/settings',
+    '/admin', '/admin/review', '/admin/users', '/admin/matches', '/admin/disputes', '/admin/settings',
     '/players/' + ids['小李'], '/static/style.css', '/static/app.js', '/static/icon.svg'];
   for (const p of pages) {
     const res = await admin.get(p);
     ok(`GET ${p}`, res.status === 200 || isRedirect(res.status), 'HTTP ' + res.status);
   }
 
-  console.log('\n== 13. 未登录访问控制 ==');
+  console.log('\n== 16. 未登录访问控制 ==');
   const anon = new Client();
-  for (const p of ['/me', '/record', '/admin/users']) {
+  for (const p of ['/me', '/record', '/admin/users', '/admin/review']) {
     const res = await anon.get(p);
     ok(`未登录访问 ${p} 被拦截`, isRedirect(res.status) && (res.location || '').includes('/login'), 'HTTP ' + res.status);
   }
   const anonRecord = await anon.post('/record', form({ t1p1: ids['小李'], t2p1: ids['小王'] }));
   ok('未登录不能录入', isRedirect(anonRecord.status), 'HTTP ' + anonRecord.status);
+  const anonApprove = await anon.post('/admin/review/' + hiddenId, { action: 'approve' });
+  ok('未登录不能审核', isRedirect(anonApprove.status), 'HTTP ' + anonApprove.status);
 
-  console.log('\n== 14. XSS 转义 ==');
+  console.log('\n== 17. XSS 转义 ==');
   const evil = new Client();
   await evil.post('/register', { nickname: '<script>x</script>', password: 'test1234', password2: 'test1234' });
   const board = await new Client().get('/');
   ok('昵称被转义，不会注入脚本', !board.text.includes('<script>x</script>'));
 
-  console.log('\n== 15. 成员管理 ==');
+  console.log('\n== 18. 成员管理 ==');
   r = await admin.post('/admin/users', { nickname: '新人甲', password: 'test1234' });
   ok('管理员手动建号', isRedirect(r.status), 'HTTP ' + r.status);
   db = await readDb();
@@ -310,6 +490,17 @@ async function main() {
   db = await readDb();
   eq('解封后状态正常', db.users.find((u) => u.id === newbie.id).status, 'active');
 
+  // 角色升降级
+  r = await admin.post('/admin/users/' + newbie.id, { action: 'setRole', role: 'reviewer' });
+  db = await readDb();
+  eq('成员被提升为审核员', db.users.find((u) => u.id === newbie.id).role, 'reviewer');
+  await admin.post('/admin/users/' + newbie.id, { action: 'setRole', role: 'member' });
+  db = await readDb();
+  eq('审核员被降回成员', db.users.find((u) => u.id === newbie.id).role, 'member');
+  await admin.post('/admin/users/' + adminId, { action: 'setRole', role: 'member' });
+  db = await readDb();
+  eq('不能改自己的角色', db.users.find((u) => u.id === adminId).role, 'admin');
+
   db = await readDb();
   const adminUser = db.users.find((u) => u.role === 'admin');
   const adminHash = adminUser.passwordHash;
@@ -319,27 +510,58 @@ async function main() {
   const adminAfter = db.users.find((u) => u.id === adminUser.id);
   ok('管理员账号不能被自己封禁或重置', adminAfter.status === 'active' && adminAfter.passwordHash === adminHash);
 
-  console.log('\n== 16. 规则设置 ==');
+  console.log('\n== 19. 规则设置 ==');
   const settingsPage = await admin.get('/admin/settings');
   eq('设置页可访问', settingsPage.status, 200);
   ok('设置页有「单场最少变动」输入框', settingsPage.text.includes('name="minWinDelta"'));
+  ok('设置页有审核开关', settingsPage.text.includes('name="requireApproval"'));
   r = await admin.post('/admin/settings', {
     clubName: '欢乐匹克球社', announcement: '周三晚 7 点老地方',
     kProvisional: '40', kNormal: '32', kHigh: '16', highThreshold: '1800',
     provisionalMatches: '5', minWinDelta: '12',
-    disputeHours: '48', antiFarmHours: '24', antiFarmFactor: '0.5', antiFarm: '1'
+    disputeHours: '48', antiFarmHours: '24', antiFarmFactor: '0.5', antiFarm: '1',
+    requireApproval: '1', maxPendingPerUser: '20'
   });
   ok('保存设置', isRedirect(r.status), 'HTTP ' + r.status);
   db = await readDb();
   eq('K 值已更新', db.settings.kNormal, 32);
   eq('定级场次已更新', db.settings.provisionalMatches, 5);
   eq('单场最少变动已更新为 12', db.settings.minWinDelta, 12);
+  eq('审核开关保持开启', db.settings.requireApproval, true);
   const afterSettings = recomputeConsistent(db);
   ok('改设置后全量重算一致', afterSettings.ok, afterSettings.detail);
   const homeAnnounce = await new Client().get('/');
   ok('公告显示在首页', homeAnnounce.text.includes('周三晚 7 点老地方'));
 
-  console.log('\n== 17. 小游戏：最高分榜 ==');
+  // 关掉审核开关 → 录入即生效
+  await admin.post('/admin/settings', {
+    clubName: '欢乐匹克球社', announcement: '周三晚 7 点老地方',
+    kProvisional: '40', kNormal: '32', kHigh: '16', highThreshold: '1800',
+    provisionalMatches: '5', minWinDelta: '12',
+    disputeHours: '48', antiFarmHours: '24', antiFarmFactor: '0.5', antiFarm: '1',
+    maxPendingPerUser: '20'
+  });
+  db = await readDb();
+  eq('关掉审核开关', db.settings.requireApproval, false);
+  r = await member.post('/record', form({
+    type: 'singles', t1p1: ids['小李'], t2p1: ids['小张'], winner: '1', detail: '0', playedAt: localNow()
+  }));
+  const instantId = matchIdFrom(r);
+  db = await readDb();
+  eq('关闭审核后录入直接生效', db.matches.find((x) => x.id === instantId).status, 'active');
+
+  // 再打开
+  await admin.post('/admin/settings', {
+    clubName: '欢乐匹克球社', announcement: '周三晚 7 点老地方',
+    kProvisional: '40', kNormal: '32', kHigh: '16', highThreshold: '1800',
+    provisionalMatches: '5', minWinDelta: '12',
+    disputeHours: '48', antiFarmHours: '24', antiFarmFactor: '0.5', antiFarm: '1',
+    requireApproval: '1', maxPendingPerUser: '20'
+  });
+  db = await readDb();
+  eq('审核开关已恢复开启', db.settings.requireApproval, true);
+
+  console.log('\n== 20. 小游戏：最高分榜 ==');
   const anonGame = new Client();
   const anonPage = await anonGame.get('/game');
   eq('未登录也能打开游戏页', anonPage.status, 200);
@@ -391,7 +613,6 @@ async function main() {
   ok('管理员成绩也记上', adminScore.best === 430, JSON.stringify(adminScore));
 
   db = await readDb();
-  const adminId = db.users.find((u) => u.role === 'admin').id;
   const adminNick = db.users.find((u) => u.id === adminId).nickname;
   const memberId = db.users.find((u) => u.nickname === '小李').id;
   const memberRow = db.gameScores.find((s) => s.userId === memberId);
@@ -418,8 +639,8 @@ async function main() {
 
 /* ---------- 辅助 ---------- */
 
-function localNow() {
-  const d = new Date(Date.now() - 60 * 1000);
+function localNow(offsetMinutes = -1) {
+  const d = new Date(Date.now() + offsetMinutes * 60 * 1000);
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

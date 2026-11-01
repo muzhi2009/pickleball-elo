@@ -211,6 +211,7 @@ p { margin: 0.4em 0; }
 }
 
 .notice p { margin: 2px 0; }
+.notice strong { flex-shrink: 0; white-space: nowrap; }
 .notice-warn { border-left-style: dashed; }
 .notice-dot {
   width: 8px;
@@ -942,3 +943,222 @@ input:focus, select:focus, textarea:focus {
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; transition: none !important; }
 }
+
+/* ---------- 比赛审核 ---------- */
+
+.badge-pending {
+  border-style: solid;
+  border-color: var(--fg);
+  color: var(--fg);
+}
+
+.badge-pending::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.badge-rejected { text-decoration: line-through; }
+
+.nav-badge {
+  display: inline-block;
+  min-width: 17px;
+  padding: 0 4px;
+  margin-left: 5px;
+  border-radius: 999px;
+  background: var(--inv);
+  color: var(--inv-fg);
+  font-size: 0.66rem;
+  font-weight: 800;
+  line-height: 17px;
+  text-align: center;
+  vertical-align: 1px;
+}
+
+.notice-pending { background: var(--soft); }
+
+.match-card.is-pending { border-style: dashed; border-color: var(--fg); }
+.match-card.is-rejected { opacity: 0.62; }
+
+.review-tabs {
+  margin-bottom: 16px;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.tab-n {
+  margin-left: 6px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  opacity: 0.55;
+}
+
+.tab.on .tab-n { opacity: 0.85; }
+
+.review-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1.5px solid var(--fg);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+}
+
+.review-list { display: grid; gap: 10px; }
+
+.review-card {
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: var(--panel);
+}
+
+.review-card.is-pending { border-color: var(--fg); }
+
+.review-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.review-head .pick { width: 18px; height: 18px; accent-color: var(--fg); }
+
+.review-line {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  font-weight: 700;
+}
+
+.review-line .side {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.review-line .side.win { text-decoration: underline; text-underline-offset: 3px; }
+.review-line .side:last-child { text-align: right; }
+
+.review-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.review-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-sm { padding: 5px 12px; font-size: 0.78rem; border-radius: 8px; }
+
+.reject-note {
+  font-size: 0.84rem;
+  border-left: 3px solid var(--fg);
+  padding-left: 10px;
+  margin: 8px 0;
+}
+
+.reject-box { display: inline-block; }
+.reject-box summary { cursor: pointer; list-style: none; }
+.reject-box summary::-webkit-details-marker { display: none; }
+.reject-box[open] { width: 100%; }
+
+/* 比赛详情页里的驳回：单独一行的大按钮，展开后占满宽度 */
+.reject-panel { display: block; margin-top: 12px; }
+.reject-panel summary.btn { border-style: dashed; }
+
+.reject-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  max-width: 420px;
+}
+
+.reject-form textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 0.86rem;
+  padding: 8px 10px;
+  border: 1.5px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.row-pending td { background: var(--soft); }
+
+.role-form { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+
+.role-form select {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 4px 6px;
+  min-width: 84px;
+  border: 1.5px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.admin-card.has-todo { border-color: var(--fg); }
+
+@media (max-width: 640px) {
+  /* 带标题的提示条在手机上纵向排列，避免三列互挤 */
+  .notice:has(> strong) {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  /* 手机上比分回到三列，避免被拉成整行 */
+  .review-line { grid-template-columns: 1fr auto 1fr; }
+  .review-line .side:last-child { text-align: right; }
+  .review-line .score { white-space: nowrap; }
+  .review-foot { flex-direction: column; align-items: flex-start; }
+  .role-form select { font-size: 0.76rem; }
+
+  /* 管理表格不再被压扁，改为横向滚动 */
+  .table { min-width: 700px; }
+  .table th, .table td { white-space: nowrap; }
+
+  /* 子导航横向滑动，不折成两行 */
+  .subnav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .subnav::-webkit-scrollbar { display: none; }
+  .subnav-link { flex-shrink: 0; }
+}
+
+/* 驳回是可展开的操作，加下划虚线提示可点 */
+.reject-box summary.linkbtn {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  color: var(--muted);
+}
+
+.reject-box summary.linkbtn:hover { color: var(--fg); }
+

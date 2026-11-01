@@ -7,6 +7,7 @@ demo-data/
 
 # 截图临时文件
 .shots/.profile/
+.shots-data/
 
 # 日志与系统文件
 *.log

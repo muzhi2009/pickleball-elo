@@ -36,14 +36,20 @@ const pages = [
   ['record-doubles', '/record?type=doubles', 'desktop'],
   ['me', '/me', 'desktop'],
   ['admin', '/admin', 'desktop'],
+  ['admin-review', '/admin/review', 'desktop'],
+  ['admin-review-rejected', '/admin/review?tab=rejected', 'desktop'],
   ['admin-users', '/admin/users', 'desktop'],
   ['m-home', '/', 'mobile'],
   ['m-matches', '/matches', 'mobile'],
   ['m-record', '/record?type=doubles', 'mobile'],
   ['m-me', '/me', 'mobile'],
-  ...EXTRA.map((pair) => {
-    const [name, url] = pair.split('=');
-    return [name, url, 'desktop'];
+  ['m-review', '/admin/review', 'mobile'],
+  ['m-users', '/admin/users', 'mobile'],
+  // EXTRA 用逗号分隔的 name=url，name 以 m- 开头则按 390px 截图
+  ...EXTRA.map((raw) => {
+    const index = raw.indexOf('=');
+    const name = raw.slice(0, index);
+    return [name, raw.slice(index + 1), name.startsWith('m-') ? 'mobile' : 'desktop'];
   })
 ];
 

@@ -172,6 +172,65 @@ function commit() {
   store.save(db);
 }
 
+/* ---------- 角色与审核权限 ---------- */
+
+function isAdmin(user) {
+  return !!user && user.role === 'admin';
+}
+
+function isReviewer(user) {
+  return !!user && (user.role === 'admin' || user.role === 'reviewer');
+}
+
+function roleLabel(role) {
+  if (role === 'admin') return '管理员';
+  if (role === 'reviewer') return '审核员';
+  return '成员';
+}
+
+function reviewLabel(match) {
+  if (match.status === 'pending') return '待审核';
+  if (match.status === 'rejected') return '已驳回';
+  if (match.status === 'void') return '已作废';
+  const review = match.review || {};
+  if (review.legacy) return '历史数据';
+  return review.self ? '已通过（自审）' : '已通过';
+}
+
+/** 待审 / 驳回的比赛只对录入人和审核者可见，避免未生效数据混进公开列表 */
+function canSeeMatch(user, match) {
+  if (match.status !== 'pending' && match.status !== 'rejected') return true;
+  if (!user) return false;
+  if (isReviewer(user)) return true;
+  return match.createdBy === user.id;
+}
+
+/** 管理员可审任何比赛；审核员不能审自己录的；普通成员没有审核权 */
+function canReview(user, match) {
+  if (!isReviewer(user)) return false;
+  if (match.status !== 'pending') return false;
+  if (isAdmin(user)) return true;
+  return match.createdBy !== user.id;
+}
+
+/** 通过一场比赛，留下审核痕迹（自审会单独标记） */
+function approveMatch(match, user, note = '') {
+  const at = Date.now();
+  const self = match.createdBy === user.id;
+  const history = (match.review && match.review.history) || [];
+  match.status = 'active';
+  match.review = {
+    ...(match.review || {}),
+    by: user.id,
+    at,
+    note: String(note || '').slice(0, 200),
+    self,
+    legacy: false,
+    history: [...history, { action: 'approve', by: user.id, at, note: String(note || '').slice(0, 200), self }]
+  };
+  logAction(user, self ? '通过比赛（自审）' : '通过比赛', `${match.type} ${match.id}`);
+}
+
 /* ---------- 小游戏：对局凭证与排行榜 ---------- */
 
 const GAME_TOKEN_TTL = 6 * 3600 * 1000;   // 凭证有效期
@@ -360,10 +419,13 @@ function parseMatch(body, { allowStatus = false } = {}) {
 /* ---------- 页面渲染 ---------- */
 
 function renderPage(req, res, viewFn, data = {}, status = 200) {
+  const user = req.user || null;
   const ctx = {
     settings: db.settings,
-    user: req.user || null,
+    user,
     flash: consumeFlash(req, res),
+    // 导航上的待办角标：只有审核者才会看到
+    pendingReviews: isReviewer(user) ? db.matches.filter((m) => m.status === 'pending').length : 0,
     ...data
   };
   send(res, status, viewFn(ctx));
@@ -531,7 +593,7 @@ async function handle(req, res) {
   if (pathname === '/matches' && req.method === 'GET') {
     const type = url.searchParams.get('type');
     const filterType = type === 'singles' || type === 'doubles' ? type : null;
-    const all = db.matches.filter((m) => !filterType || m.type === filterType);
+    const all = db.matches.filter((m) => canSeeMatch(req.user, m) && (!filterType || m.type === filterType));
     const pages = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
     const pageNum = Math.min(pages, Math.max(1, Number(url.searchParams.get('page')) || 1));
     const items = all.slice((pageNum - 1) * PAGE_SIZE, pageNum * PAGE_SIZE);
@@ -554,7 +616,7 @@ async function handle(req, res) {
     }
     const id = decodeURIComponent(match[1]);
     const item = db.matches.find((m) => m.id === id);
-    if (!item) return notFound(req, res);
+    if (!item || !canSeeMatch(req.user, item)) return notFound(req, res);
     const inMatch = (item.team1 || []).includes(req.user.id) || (item.team2 || []).includes(req.user.id);
     const withinWindow = Date.now() - (item.createdAt || 0) <= Number(db.settings.disputeHours) * 3600 * 1000;
     const canDispute = item.status === 'active' && !item.disputed && inMatch && withinWindow && req.user.role !== 'admin';
@@ -562,7 +624,8 @@ async function handle(req, res) {
       match: item,
       users: usersMap(),
       canDispute,
-      isAdmin: req.user.role === 'admin'
+      isAdmin: isAdmin(req.user),
+      canReview: canReview(req.user, item)
     });
   }
 
@@ -679,7 +742,22 @@ async function handle(req, res) {
           values: parsed.data
         }, 400);
       }
+
+      const needsReview = db.settings.requireApproval !== false;
+      if (needsReview) {
+        const limit = Math.max(1, Number(db.settings.maxPendingPerUser) || 20);
+        const waiting = db.matches.filter((m) => m.createdBy === req.user.id && m.status === 'pending').length;
+        if (waiting >= limit) {
+          return renderPage(req, res, views.recordPage, {
+            players: activePlayers(),
+            error: `你还有 ${waiting} 场在等审核，超过上限（${limit} 场），等审核完再录新的。`,
+            values: parsed.data
+          }, 429);
+        }
+      }
+
       const data = parsed.data;
+      const now = Date.now();
       const created = {
         id: store.randomId('m_'),
         type: data.type,
@@ -691,17 +769,32 @@ async function handle(req, res) {
         score2: data.score2,
         note: data.note,
         playedAt: data.playedAt,
-        status: 'active',
+        status: needsReview ? 'pending' : 'active',
         disputed: false,
         dispute: null,
         createdBy: req.user.id,
-        createdAt: Date.now(),
-        changes: []
+        createdAt: now,
+        changes: [],
+        review: {
+          by: needsReview ? null : req.user.id,
+          at: needsReview ? null : now,
+          note: '',
+          self: false,
+          legacy: false,
+          history: needsReview ? [] : [{ action: 'approve', by: req.user.id, at: now, note: '未开启审核，录入即生效', self: true }]
+        }
       };
       db.matches.push(created);
-      logAction(req.user, '录入比赛', `${data.type} ${created.id}`);
-      commit();
-      setFlash(res, 'ok', '比赛已录入，Elo 已更新。');
+
+      if (needsReview) {
+        logAction(req.user, '提交比赛（待审核）', `${data.type} ${created.id}`);
+        store.save(db); // 待审核不计分，不需要重算 Elo
+        setFlash(res, 'ok', '已提交，管理员审核通过后才计入排名。');
+      } else {
+        logAction(req.user, '录入比赛', `${data.type} ${created.id}`);
+        commit();
+        setFlash(res, 'ok', '比赛已录入，Elo 已更新。');
+      }
       return redirect(res, `/matches/${encodeURIComponent(created.id)}`);
     }
   }
@@ -719,13 +812,18 @@ async function handle(req, res) {
       if (change) history.push({ match: m, delta: change.delta });
     }
     history.sort((a, b) => (b.match.playedAt || 0) - (a.match.playedAt || 0));
+    const mySubmissions = db.matches
+      .filter((m) => m.createdBy === req.user.id && (m.status === 'pending' || m.status === 'rejected'))
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+      .slice(0, 20);
     return renderPage(req, res, views.mePage, {
       ratings: {
         singles: ratingOf(req.user.id, 'singles'),
         doubles: ratingOf(req.user.id, 'doubles')
       },
       history: history.slice(0, 20),
-      pending: db.matches.filter((m) => m.disputed && m.dispute && m.dispute.by === req.user.id)
+      pending: db.matches.filter((m) => m.disputed && m.dispute && m.dispute.by === req.user.id),
+      submissions: mySubmissions
     });
   }
 
@@ -808,13 +906,20 @@ async function handle(req, res) {
 
   if (pathname.startsWith('/admin')) {
     if (!req.user) {
-      setFlash(res, 'err', '请先用管理员账号登录');
+      setFlash(res, 'err', '请先登录');
       return redirect(res, '/login');
     }
-    if (req.user.role !== 'admin') {
+    if (!isReviewer(req.user)) {
       return renderPage(req, res, views.errorPage, {
         errorTitle: '没有权限',
-        errorMessage: '这个页面只有管理员能访问。'
+        errorMessage: '这一块只有管理员和审核员能进。'
+      }, 403);
+    }
+    // 成员管理、比赛管理、规则设置、导出、重算仍然只属于管理员
+    if (/^\/admin\/(users|matches|settings|export\.csv|recompute)(\/|$)/.test(pathname) && !isAdmin(req.user)) {
+      return renderPage(req, res, views.errorPage, {
+        errorTitle: '没有权限',
+        errorMessage: '这一步只有管理员能做，审核员只能处理和审核相关的操作。'
       }, 403);
     }
   }
@@ -825,10 +930,208 @@ async function handle(req, res) {
         pending: db.users.filter((u) => u.status === 'pending').length,
         active: db.users.filter((u) => u.status === 'active').length,
         matches: db.matches.filter((m) => m.status === 'active').length,
-        disputes: db.matches.filter((m) => m.disputed).length
+        disputes: db.matches.filter((m) => m.disputed).length,
+        pendingMatches: db.matches.filter((m) => m.status === 'pending').length,
+        rejectedMatches: db.matches.filter((m) => m.status === 'rejected').length
       },
       logs: db.logs.slice(-8)
     });
+  }
+
+  /* ---------- 比赛审核队列 ---------- */
+
+  if (pathname === '/admin/review' && req.method === 'GET') {
+    const rawTab = url.searchParams.get('tab');
+    const tab = ['pending', 'active', 'rejected', 'all'].includes(rawTab) ? rawTab : 'pending';
+    const list = db.matches
+      .filter((m) => (tab === 'all' ? true : m.status === tab))
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+      .slice(0, 100);
+    return renderPage(req, res, views.adminReview, {
+      tab,
+      items: list,
+      users: usersMap(),
+      counts: {
+        pending: db.matches.filter((m) => m.status === 'pending').length,
+        active: db.matches.filter((m) => m.status === 'active').length,
+        rejected: db.matches.filter((m) => m.status === 'rejected').length,
+        all: db.matches.length
+      },
+      // 审核员看到自己录的比赛，但按钮会是禁用状态
+      reviewerId: req.user.id,
+      adminMode: isAdmin(req.user)
+    });
+  }
+
+  // 排除 batch，否则 /admin/review/batch 会被当成单场 id
+  let reviewAction = pathname.match(/^\/admin\/review\/(?!batch$)([^/]+)$/);
+  if (reviewAction && req.method === 'POST') {
+    const id = decodeURIComponent(reviewAction[1]);
+    const item = db.matches.find((m) => m.id === id);
+    if (!item) return notFound(req, res);
+    if (item.status !== 'pending') {
+      setFlash(res, 'err', '这场比赛不在待审核状态');
+      return redirect(res, '/admin/review');
+    }
+    if (!canReview(req.user, item)) {
+      setFlash(res, 'err', '这场是你自己录入的，需要另一位审核者或管理员通过');
+      return redirect(res, '/admin/review');
+    }
+
+    const body = await readForm(req);
+    const action = String(body.get('action') || '');
+    const note = String(body.get('note') || '').trim().slice(0, 200);
+
+    if (action === 'approve') {
+      approveMatch(item, req.user, note);
+      commit();
+      setFlash(res, 'ok', '已通过，Elo 已重算。');
+    } else if (action === 'reject') {
+      if (note.length < 2) {
+        setFlash(res, 'err', '驳回请写一句原因，方便录入人修改');
+        return redirect(res, '/admin/review');
+      }
+      const at = Date.now();
+      item.status = 'rejected';
+      item.review = {
+        ...(item.review || {}),
+        by: req.user.id,
+        at,
+        note,
+        self: item.createdBy === req.user.id,
+        legacy: false,
+        history: [...((item.review && item.review.history) || []), { action: 'reject', by: req.user.id, at, note, self: item.createdBy === req.user.id }]
+      };
+      logAction(req.user, '驳回比赛', `${item.id}：${note}`);
+      store.save(db); // 驳回不影响 Elo
+      setFlash(res, 'ok', '已驳回，录入人可以修改后重新提交。');
+    } else {
+      setFlash(res, 'err', '无效的操作');
+    }
+    return redirect(res, '/admin/review');
+  }
+
+  /* 改后通过：审核者可以直接修正比分再放行 */
+  let reviewEdit = pathname.match(/^\/admin\/review\/([^/]+)\/edit$/);
+  if (reviewEdit) {
+    const id = decodeURIComponent(reviewEdit[1]);
+    const item = db.matches.find((m) => m.id === id);
+    if (!item) return notFound(req, res);
+    if (!canReview(req.user, item)) {
+      setFlash(res, 'err', item.status !== 'pending' ? '这场比赛不在待审核状态' : '这场是你自己录入的，需要另一位审核者或管理员处理');
+      return redirect(res, '/admin/review');
+    }
+    if (req.method === 'GET') {
+      return renderPage(req, res, views.adminReviewEdit, {
+        match: item,
+        players: activePlayers()
+      });
+    }
+    if (req.method === 'POST') {
+      const body = await readForm(req);
+      const parsed = parseMatch(body);
+      if (parsed.error) {
+        return renderPage(req, res, views.adminReviewEdit, {
+          match: item,
+          players: activePlayers(),
+          error: parsed.error
+        }, 400);
+      }
+      const data = parsed.data;
+      Object.assign(item, {
+        type: data.type,
+        team1: data.team1,
+        team2: data.team2,
+        winner: data.winner,
+        detail: data.detail,
+        score1: data.score1,
+        score2: data.score2,
+        note: data.note,
+        playedAt: data.playedAt
+      });
+      approveMatch(item, req.user, "审核时修正后通过");
+      commit();
+      setFlash(res, 'ok', '已按修正后的结果通过，Elo 已重算。');
+      return redirect(res, `/matches/${encodeURIComponent(item.id)}`);
+    }
+  }
+
+  if (pathname === '/admin/review/batch' && req.method === 'POST') {
+    const body = await readForm(req);
+    const ids = body.getAll('ids').slice(0, 50);
+    let done = 0;
+    let skipped = 0;
+    for (const raw of ids) {
+      const item = db.matches.find((m) => m.id === raw);
+      if (!item || !canReview(req.user, item)) {
+        skipped += 1;
+        continue;
+      }
+      approveMatch(item, req.user, '批量通过');
+      done += 1;
+    }
+    if (done) commit(); else store.save(db);
+    if (done) {
+      setFlash(res, 'ok', `已通过 ${done} 场${skipped ? `，${skipped} 场没有权限已跳过` : ''}。`);
+    } else {
+      setFlash(res, 'err', skipped ? '选中的比赛都没有权限处理' : '没有选中任何比赛');
+    }
+    return redirect(res, '/admin/review');
+  }
+
+  /* 参赛者修改被驳回的比赛后重新提交 */
+  let resubmit = pathname.match(/^\/matches\/([^/]+)\/resubmit$/);
+  if (resubmit && req.method === 'POST') {
+    if (!req.user) return redirect(res, '/login');
+    const id = decodeURIComponent(resubmit[1]);
+    const item = db.matches.find((m) => m.id === id);
+    if (!item) return notFound(req, res);
+    if (item.createdBy !== req.user.id && !isAdmin(req.user)) {
+      setFlash(res, 'err', '只能重新提交自己录入的比赛');
+      return redirect(res, `/matches/${encodeURIComponent(id)}`);
+    }
+    if (item.status !== 'rejected') {
+      setFlash(res, 'err', '只有被驳回的比赛可以重新提交');
+      return redirect(res, `/matches/${encodeURIComponent(id)}`);
+    }
+    const at = Date.now();
+    item.status = 'pending';
+    item.review = {
+      ...(item.review || {}),
+      by: null,
+      at: null,
+      note: '',
+      self: false,
+      legacy: false,
+      history: [...((item.review && item.review.history) || []), { action: 'resubmit', by: req.user.id, at, note: '' }]
+    };
+    logAction(req.user, '重新提交比赛', item.id);
+    store.save(db);
+    setFlash(res, 'ok', '已重新提交，等待审核。');
+    return redirect(res, `/matches/${encodeURIComponent(id)}`);
+  }
+
+  /* 待审比赛也可以由录入人自己撤销（录错了） */
+  let withdraw = pathname.match(/^\/matches\/([^/]+)\/withdraw$/);
+  if (withdraw && req.method === 'POST') {
+    if (!req.user) return redirect(res, '/login');
+    const id = decodeURIComponent(withdraw[1]);
+    const item = db.matches.find((m) => m.id === id);
+    if (!item) return notFound(req, res);
+    if (item.createdBy !== req.user.id && !isAdmin(req.user)) {
+      setFlash(res, 'err', '只能撤销自己录入的比赛');
+      return redirect(res, '/matches');
+    }
+    if (item.status !== 'pending' && item.status !== 'rejected') {
+      setFlash(res, 'err', '已经生效的比赛不能撤销，请联系管理员作废');
+      return redirect(res, `/matches/${encodeURIComponent(id)}`);
+    }
+    const index = db.matches.indexOf(item);
+    if (index >= 0) db.matches.splice(index, 1);
+    logAction(req.user, '撤销待审比赛', item.id);
+    store.save(db);
+    setFlash(res, 'ok', '已撤销这场提交。');
+    return redirect(res, '/me');
   }
 
   if (pathname === '/admin/users' && req.method === 'GET') {
@@ -886,6 +1189,22 @@ async function handle(req, res) {
       target.sessionEpoch = (target.sessionEpoch || 0) + 1;
       logAction(req.user, '重置密码', target.nickname);
       setFlash(res, 'ok', `${target.nickname} 的新密码：${temp}（请立即转告本人）`);
+    } else if (action === 'setRole') {
+      const role = String(body.get('role') || '');
+      if (!store.USER_ROLES.includes(role)) {
+        setFlash(res, 'err', '无效的角色');
+      } else if (target.id === req.user.id) {
+        setFlash(res, 'err', '不能修改自己的角色，请让另一位管理员操作');
+      } else if (target.role === role) {
+        setFlash(res, 'ok', `${target.nickname} 已经是${roleLabel(role)}`);
+      } else if (target.role === 'admin' && db.users.filter((u) => u.role === 'admin').length <= 1) {
+        setFlash(res, 'err', '至少要保留一个管理员');
+      } else {
+        // 角色每次请求都从库里读，改完立即生效，不用踢下线
+        target.role = role;
+        logAction(req.user, '调整角色', `${target.nickname} → ${roleLabel(role)}`);
+        setFlash(res, 'ok', `${target.nickname} 现在是${roleLabel(role)}`);
+      }
     } else {
       setFlash(res, 'err', '无效的操作');
     }
@@ -965,6 +1284,15 @@ async function handle(req, res) {
     const id = decodeURIComponent(resolveDispute[1]);
     const item = db.matches.find((m) => m.id === id);
     if (!item) return notFound(req, res);
+    // 审核员不能裁决跟自己有关的申诉
+    if (!isAdmin(req.user)) {
+      const involved = [...(item.team1 || []), ...(item.team2 || [])].includes(req.user.id) ||
+        (item.dispute && item.dispute.by === req.user.id);
+      if (involved) {
+        setFlash(res, 'err', '这场申诉涉及你自己，需要管理员处理');
+        return redirect(res, '/admin/disputes');
+      }
+    }
     const body = await readForm(req);
     const action = String(body.get('action') || '');
     if (action === 'uphold') {
@@ -1009,7 +1337,9 @@ async function handle(req, res) {
       db.settings.antiFarmHours = Math.round(number('antiFarmHours', db.settings.antiFarmHours, 0, 720));
       db.settings.antiFarmFactor = number('antiFarmFactor', db.settings.antiFarmFactor, 0, 1);
       db.settings.antiFarm = body.get('antiFarm') === '1';
-      logAction(req.user, '修改规则', 'K 值 / 申诉时限');
+      db.settings.requireApproval = body.get('requireApproval') === '1';
+      db.settings.maxPendingPerUser = Math.round(number('maxPendingPerUser', db.settings.maxPendingPerUser ?? 20, 1, 200));
+      logAction(req.user, '修改规则', 'K 值 / 申诉时限 / 审核设置');
       commit();
       setFlash(res, 'ok', '设置已保存，历史 Elo 已重算。');
       return redirect(res, '/admin/settings');
@@ -1046,7 +1376,7 @@ function exportCsv(req, res, url) {
       const d = ratingOf(u.id, 'doubles');
       lines.push([
         views.esc(u.nickname).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'"),
-        u.role === 'admin' ? '管理员' : '成员',
+        roleLabel(u.role),
         u.status === 'active' ? '正常' : u.status === 'pending' ? '待审核' : '封禁',
         Math.round(s.rating), s.matches, s.wins, s.losses,
         Math.round(d.rating), d.matches, d.wins, d.losses,
@@ -1054,7 +1384,7 @@ function exportCsv(req, res, url) {
       ].map(csvCell).join(','));
     }
   } else {
-    lines = ['时间,类型,队伍A,队伍B,比分A,比分B,胜方,状态,争议,录入人,备注,Elo变化'];
+    lines = ['时间,类型,队伍A,队伍B,比分A,比分B,胜方,状态,审核状态,审核人,争议,录入人,备注,Elo变化'];
     const users = usersMap();
     for (const m of db.matches) {
       const name = (id) => users[id]?.nickname || '已删除';
@@ -1067,7 +1397,9 @@ function exportCsv(req, res, url) {
         m.detail ? m.score1 : '',
         m.detail ? m.score2 : '',
         Number(m.winner) === 1 ? 'A' : 'B',
-        m.status === 'void' ? '作废' : '有效',
+        m.status === 'void' ? '作废' : m.status === 'active' ? '有效' : m.status === 'pending' ? '待审核' : '已驳回',
+        reviewLabel(m),
+        m.review && m.review.by ? name(m.review.by) : '',
         m.disputed ? '争议中' : '',
         name(m.createdBy),
         m.note || '',
