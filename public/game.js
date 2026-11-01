@@ -15,9 +15,55 @@
   const LINE_Y = 96;           // 警戒线
   const DROP_Y = 52;           // 待落球悬停高度
   const STEP = 1000 / 60;      // 固定物理步长
-  const DROP_COOLDOWN = 380;   // 两球之间最小间隔
-  const DANGER_LIMIT = 1900;   // 越线静止多久算结束
   const SETTLE_GRACE = 1100;   // 新球落地宽限期
+  const FIRST_DROP_DELAY = 1200; // 开局给玩家的准备时间
+
+  /* ---------- 关卡与难度 ----------
+   * 球自动下落，玩家只负责瞄准。三条曲线同时收紧：
+   *   dropMs    两次落球间隔，越短越没时间思考（主曲线）
+   *   dangerMs  球停在警戒线上多久判负，越短越不容忍堆积
+   *   pool      出场球的等级分布，越往后大球越多，棋盘填得更快
+   *
+   * 数值来源：tools/game-balance.js 让"零延迟机器人"在真实浏览器里按节奏打，
+   * 第一版 1.5s→0.52s 的结果是机器人打到第 15~22 关、200 多球还没死，
+   * 说明节奏上限对机器不构成压力、对真人又太长。第二版把基准压到 1.4s、
+   * 衰减加陡、并在第 7 / 11 关放宽球池，让一局收在 100 球上下。
+   *
+   * 下限保护：间隔不低于 470ms（约 28 帧，再快就只是看，不是玩了），
+   * 判负不低于 1050ms（低于 1 秒会让一次手滑直接结束，变成劝退）。
+   */
+  const STAGES = [
+    { dropMs: 1400, dangerMs: 1700 },
+    { dropMs: 1290, dangerMs: 1660 },
+    { dropMs: 1185, dangerMs: 1620 },
+    { dropMs: 1090, dangerMs: 1580 },
+    { dropMs: 1000, dangerMs: 1530 },
+    { dropMs: 920,  dangerMs: 1480 },
+    { dropMs: 845,  dangerMs: 1420 },
+    { dropMs: 780,  dangerMs: 1360 },
+    { dropMs: 715,  dangerMs: 1290 },
+    { dropMs: 660,  dangerMs: 1220 }
+  ];
+  const STAGE_GOAL = 10;       // 每关落满多少球进入下一关
+  const STAGE_MAX = STAGES.length;
+  const DROP_FLOOR = 470;      // 落球间隔硬下限
+  const DANGER_FLOOR = 1050;   // 判负宽限硬下限
+
+  // 出场球池：低关卡只给小球，第 7 / 11 关起放大球比例，棋盘填得更快
+  const POOL_STEPS = [
+    { from: 1,  pool: [0, 0, 0, 0, 1, 1, 1, 2, 2, 3, 4] },
+    { from: 7,  pool: [0, 0, 0, 1, 1, 1, 2, 2, 3, 3, 4] },
+    { from: 11, pool: [0, 0, 1, 1, 1, 2, 2, 3, 3, 4, 4] }
+  ];
+
+  function stageConfig(n) {
+    if (n <= STAGE_MAX) return STAGES[n - 1];
+    const extra = n - STAGE_MAX;
+    return {
+      dropMs: Math.max(DROP_FLOOR, STAGES[STAGE_MAX - 1].dropMs - extra * 30),
+      dangerMs: Math.max(DANGER_FLOOR, STAGES[STAGE_MAX - 1].dangerMs - extra * 45)
+    };
+  }
 
   // 等级：半径、主色、暗色（描边/孔洞）、合成得分（三角数）
   const LEVELS = [
@@ -51,6 +97,9 @@
   const restartBtn = document.getElementById('restartBtn');
   const soundBtn = document.getElementById('soundBtn');
   const rankBody = document.getElementById('rankBody');
+  const stageEl = document.getElementById('gameStage');
+  const stageBarEl = document.getElementById('gameStageBar');
+  const overStageEl = document.getElementById('overStage');
   const loggedIn = document.body.dataset.loggedIn === '1';
 
   /* ---------- 画布尺寸（跟随 DPR） ---------- */
@@ -171,8 +220,6 @@
   let currentLevel = 0;
   let nextLevel = 0;
   let aimX = W / 2;
-  let canDrop = true;
-  let lastDropAt = 0;
   let dangerTime = 0;
   let pendingMerges = [];
   let effects = [];
@@ -181,9 +228,19 @@
   let gameStartAt = 0;
   let submitted = false;
 
+  let stage = 1;             // 当前关卡
+  let stageDrops = 0;        // 本关已落球数
+  let totalDrops = 0;        // 全局落球数
+  let dropAt = 0;            // 下一次自动落球的绝对时间
+  let autoDrop = true;       // 测试时关掉，改用脚本手动喂球
+  let stageFlashAt = 0;      // 关卡切换提示的起始时间
+  let maxStage = 1;
+
   function pickLevel() {
-    // 只出前 5 级，权重从高到低，保证节奏和原版一致
-    const pool = [0, 0, 0, 0, 1, 1, 1, 2, 2, 3, 4];
+    let pool = POOL_STEPS[0].pool;
+    for (const step of POOL_STEPS) {
+      if (stage >= step.from) pool = step.pool;
+    }
     return pool[(Math.random() * pool.length) | 0];
   }
 
@@ -223,17 +280,24 @@
     dangerTime = 0;
     pendingMerges = [];
     effects = [];
-    canDrop = true;
-    lastDropAt = 0;
     submitted = false;
     running = true;
     currentLevel = pickLevel();
     nextLevel = pickLevel();
     aimX = W / 2;
     gameStartAt = Date.now();
+
+    stage = 1;
+    maxStage = 1;
+    stageDrops = 0;
+    totalDrops = 0;
+    stageFlashAt = 0;
+    dropAt = performance.now() + FIRST_DROP_DELAY;
+
     acc = 0;
     lastTime = 0;
     renderScore();
+    renderStage();
     drawNext();
     if (overEl) overEl.hidden = true;
   }
@@ -297,6 +361,26 @@
     if (bestEl) bestEl.textContent = String(Math.max(best, score));
   }
 
+  function renderStage() {
+    if (stageEl) stageEl.textContent = String(stage);
+    if (stageBarEl) {
+      const pct = Math.min(100, (stageDrops / STAGE_GOAL) * 100);
+      stageBarEl.style.width = pct.toFixed(1) + '%';
+      stageBarEl.parentElement?.setAttribute(
+        'aria-label', `第 ${stage} 关，已落 ${stageDrops} / ${STAGE_GOAL} 球`
+      );
+    }
+  }
+
+  function advanceStage() {
+    stage += 1;
+    stageDrops = 0;
+    stageFlashAt = performance.now();
+    if (stage > maxStage) maxStage = stage;
+    renderStage();
+    chime();
+  }
+
   function drawNext() {
     if (!nextCtx) return;
     const s = sprites[nextLevel];
@@ -313,10 +397,12 @@
     nextCtx.drawImage(s.canvas, (56 - drawW) / 2, (56 - drawW) / 2, drawW, drawW);
   }
 
-  /* ---------- 掉落 ---------- */
+  /* ---------- 掉落 ----------
+   * 落球由计时器驱动，玩家只控制横向位置。间隔取自关卡配置，
+   * 每落一球重新排程，落满 STAGE_GOAL 球升级。
+   */
   function drop() {
-    if (!running || !canDrop) return;
-    canDrop = false;
+    if (!running) return;
     const level = currentLevel;
     const { r } = LEVELS[level];
     const x = Math.max(r + 2, Math.min(W - r - 2, aimX));
@@ -326,8 +412,23 @@
     currentLevel = nextLevel;
     nextLevel = pickLevel();
     drawNext();
-    lastDropAt = performance.now();
-    setTimeout(() => { canDrop = true; }, DROP_COOLDOWN);
+
+    totalDrops += 1;
+    stageDrops += 1;
+    dropAt = performance.now() + stageConfig(stage).dropMs;
+    if (stageDrops >= STAGE_GOAL) advanceStage();
+    else renderStage();
+  }
+
+  // 页面切到后台再回来时不要一次倾泻一堆球，直接重新排程
+  function pumpAutoDrop(now) {
+    if (!running || !autoDrop) return;
+    if (now < dropAt) return;
+    if (now - dropAt > 1500) {
+      dropAt = now + stageConfig(stage).dropMs;
+      return;
+    }
+    drop();
   }
 
   /* ---------- 结束判定 ---------- */
@@ -343,7 +444,7 @@
     }
     if (danger) {
       dangerTime += dt;
-      if (dangerTime > DANGER_LIMIT) gameOver();
+      if (dangerTime > stageConfig(stage).dangerMs) gameOver();
     } else {
       dangerTime = Math.max(0, dangerTime - dt * 1.6);
     }
@@ -355,6 +456,7 @@
     const elapsed = Date.now() - gameStartAt;
     if (overScoreEl) overScoreEl.textContent = String(score);
     if (overBestEl) overBestEl.textContent = String(Math.max(best, score));
+    if (overStageEl) overStageEl.textContent = String(maxStage);
     if (overEl) overEl.hidden = false;
     if (overNoteEl) {
       overNoteEl.textContent = loggedIn ? '正在保存成绩…' : '未登录，本局不计入排行榜';
@@ -447,6 +549,28 @@
     } catch { /* 静默失败 */ }
   }
 
+  // 过关提示音：上行三音（C-E-G）
+  function chime() {
+    if (!soundOn) return;
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const t0 = audioCtx.currentTime;
+      [523.25, 659.25, 783.99].forEach((freq, i) => {
+        const t = t0 + i * 0.085;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, t);
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(0.12, t + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.24);
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + 0.26);
+      });
+    } catch { /* 静默失败 */ }
+  }
+
   /* ---------- 渲染 ---------- */
   function draw() {
     ctx.clearRect(0, 0, W, H);
@@ -455,10 +579,11 @@
 
     // 警戒线
     const hot = dangerTime > 200;
+    const limit = stageConfig(stage).dangerMs;
     ctx.save();
     ctx.setLineDash([7, 7]);
     ctx.lineWidth = 2;
-    ctx.strokeStyle = hot ? `rgba(230,70,70,${0.45 + Math.min(0.5, dangerTime / DANGER_LIMIT)})` : 'rgba(140,140,150,0.42)';
+    ctx.strokeStyle = hot ? `rgba(230,70,70,${0.45 + Math.min(0.5, dangerTime / limit)})` : 'rgba(140,140,150,0.42)';
     ctx.beginPath();
     ctx.moveTo(0, LINE_Y);
     ctx.lineTo(W, LINE_Y);
@@ -503,6 +628,58 @@
       ctx.lineWidth = 3 * (1 - p) + 0.5;
       ctx.stroke();
     }
+
+    // 顶部倒计时：压在球和待落球之上，大球悬停时也不会把它盖住
+    if (running && autoDrop) {
+      const cfg = stageConfig(stage);
+      const remain = Math.max(0, dropAt - now);
+      const frac = Math.min(1, remain / cfg.dropMs);
+      const barX = 14;
+      const barW = W - 28;
+      ctx.save();
+      ctx.fillStyle = 'rgba(150,150,160,0.22)';
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(barX, 10, barW, 5, 2.5) : ctx.rect(barX, 10, barW, 5);
+      ctx.fill();
+      ctx.fillStyle = frac < 0.28 ? 'rgba(232,96,84,0.95)' : 'rgba(120,130,145,0.72)';
+      ctx.beginPath();
+      ctx.roundRect
+        ? ctx.roundRect(barX, 10, Math.max(0.001, barW * frac), 5, 2.5)
+        : ctx.rect(barX, 10, Math.max(0.001, barW * frac), 5);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 关卡切换提示：压在最上层，不被球挡住
+    if (stageFlashAt) {
+      const fp = (now - stageFlashAt) / 1100;
+      if (fp >= 1) {
+        stageFlashAt = 0;
+      } else {
+        const alpha = fp < 0.15 ? fp / 0.15 : 1 - (fp - 0.15) / 0.85;
+        const cfg = stageConfig(stage);
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, alpha) * 0.92;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = 'rgba(20,22,28,0.58)';
+        ctx.beginPath();
+        ctx.roundRect
+          ? ctx.roundRect(W / 2 - 78, 152, 156, 66, 14)
+          : ctx.rect(W / 2 - 78, 152, 156, 66);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = '800 34px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+        ctx.fillText('第 ' + stage + ' 关', W / 2, 178);
+        ctx.font = '600 13px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.84)';
+        ctx.fillText(
+          cfg.dropMs <= DROP_FLOOR ? '最快节奏' : '节奏加快 · ' + (cfg.dropMs / 1000).toFixed(2) + 's',
+          W / 2, 203
+        );
+        ctx.restore();
+      }
+    }
   }
 
   function tick(now) {
@@ -522,6 +699,7 @@
       }
       checkDanger(dt);
       cullStrays();
+      pumpAutoDrop(now);
     }
     draw();
     requestAnimationFrame(tick);
@@ -533,6 +711,7 @@
     return ((clientX - rect.left) / rect.width) * W;
   }
 
+  // 球是自动落下的，玩家只负责瞄准：鼠标移过去就跟随，触屏按住拖动
   let dragging = false;
   canvas.addEventListener('pointerdown', (e) => {
     dragging = true;
@@ -541,21 +720,16 @@
     e.preventDefault();
   });
   canvas.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
+    // 鼠标悬停也跟随瞄准；触屏只有按住时才响应
+    if (e.pointerType !== 'mouse' && !dragging) return;
     aimX = pointerToX(e.clientX);
     e.preventDefault();
   });
-  canvas.addEventListener('pointerup', (e) => {
-    if (!dragging) return;
-    dragging = false;
-    aimX = pointerToX(e.clientX);
-    drop();
-    e.preventDefault();
-  });
+  canvas.addEventListener('pointerup', () => { dragging = false; });
   canvas.addEventListener('pointercancel', () => { dragging = false; });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  // 键盘：左右移动 + 空格/回车落下（桌面调试与无障碍）
+  // 键盘：左右移动瞄准（落球不用按键，免得以为还能手动控制节奏）
   window.addEventListener('keydown', (e) => {
     if (!running) {
       if (e.key === 'Enter' || e.key === ' ') { restartBtn?.click(); }
@@ -563,7 +737,6 @@
     }
     if (e.key === 'ArrowLeft') { aimX = Math.max(20, aimX - 18); e.preventDefault(); }
     if (e.key === 'ArrowRight') { aimX = Math.min(W - 20, aimX + 18); e.preventDefault(); }
-    if (e.key === ' ' || e.key === 'ArrowDown' || e.key === 'Enter') { drop(); e.preventDefault(); }
   });
 
   if (restartBtn) {
@@ -596,6 +769,24 @@
   window.__pbGame = {
     get score() { return score; },
     get running() { return running; },
+    get stage() { return stage; },
+    get maxStage() { return maxStage; },
+    get stageDrops() { return stageDrops; },
+    get totalDrops() { return totalDrops; },
+    get interval() { return stageConfig(stage).dropMs; },
+    get dangerMs() { return stageConfig(stage).dangerMs; },
+    get pending() { return { level: currentLevel, next: nextLevel, r: LEVELS[currentLevel].r }; },
+    get stages() {
+      const out = [];
+      for (let i = 1; i <= STAGE_MAX + 8; i++) {
+        const c = stageConfig(i);
+        out.push({ stage: i, dropMs: c.dropMs, dangerMs: c.dangerMs });
+      }
+      return out;
+    },
+    get aim() { return aimX; },
+    set aim(v) { aimX = v; },
+    setAuto(on) { autoDrop = !!on; if (!on) dropAt = Infinity; else dropAt = performance.now(); },
     get balls() { return Composite.allBodies(world).filter((b) => b.plugin && b.plugin.ball).length; },
     get token() { return window.__gameToken || ''; },
     get info() {
@@ -609,16 +800,25 @@
           sprite: !!sprites[b.plugin.level]
         }));
     },
+    // 场上最高的堆叠位置（用于难度分析和测试）
+    get stackTop() {
+      let top = H;
+      for (const b of Composite.allBodies(world)) {
+        if (!b.plugin || !b.plugin.ball) continue;
+        top = Math.min(top, b.position.y - LEVELS[b.plugin.level].r);
+      }
+      return Math.round(top);
+    },
     finish() { gameOver(); },
+    dropNow() { drop(); },
     drop(count) {
       let n = 0;
       const timer = setInterval(() => {
         if (!running || n >= (count || 10)) { clearInterval(timer); return; }
         aimX = 60 + Math.random() * (W - 120);
-        canDrop = true;
         drop();
         n++;
-      }, DROP_COOLDOWN + 40);
+      }, 320);
       return timer;
     }
   };

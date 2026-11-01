@@ -143,6 +143,8 @@ async function main() {
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('Network.enable');
+    // 静态资源有 1 小时缓存，测试必须读到磁盘上的当前版本
+    await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
     await cdp.send('Network.setCookie', {
       name: 'sid', value: sid, domain: '127.0.0.1', path: '/', httpOnly: true
     });
@@ -176,13 +178,64 @@ async function main() {
     ok('Matter 物理引擎可用', await evalJs('typeof window.Matter === "object"'));
     ok('画布已按 DPR 放大', await evalJs('document.getElementById("gameCanvas").width > 300'),
       '宽度 ' + await evalJs('document.getElementById("gameCanvas").width') + 'px');
+    ok('关卡面板已渲染', await evalJs('document.getElementById("gameStage").textContent') === '1');
+    ok('开局是第 1 关', await evalJs('window.__pbGame.stage') === 1);
 
-    console.log('\n【2】自动落球 28 次');
-    await evalJs('window.__pbGame.drop(28)');
-    await sleep(13500);
+    console.log('\n【2】球自动下落（全程不做任何输入）');
+    const before = await evalJs('({drops: __pbGame.totalDrops, interval: __pbGame.interval})');
+    await sleep(5000);
+    const after = await evalJs('({drops: __pbGame.totalDrops, running: __pbGame.running})');
+    const autoDropped = after.drops - before.drops;
+    console.log('    5 秒内自动落了 ' + autoDropped + ' 球（间隔 ' + before.interval + 'ms）');
+    ok('不操作也会自动落球', autoDropped >= 2, autoDropped + ' 球');
+    ok('落球节奏接近配置间隔', autoDropped <= 5, autoDropped + ' 球');
+    ok('自动落球时游戏仍在进行', after.running);
 
-    const state = await evalJs('({ score: window.__pbGame.score, balls: window.__pbGame.balls, running: window.__pbGame.running, token: window.__pbGame.token })');
-    console.log('    分数=' + state.score + '  场上球数=' + state.balls + '  进行中=' + state.running);
+    console.log('\n【3】关卡推进与难度递增');
+    await evalJs('window.__pbGame.setAuto(false); true');
+    await evalJs('document.getElementById("restartBtn").click(); true');
+    await sleep(200);
+    await evalJs('window.__pbGame.setAuto(false); true');
+
+    const stage1 = await evalJs('({stage: __pbGame.stage, interval: __pbGame.interval, danger: __pbGame.dangerMs})');
+    // 一路落下 10 球，应该正好进入第 2 关
+    for (let i = 0; i < 10; i++) {
+      await evalJs(`__pbGame.aim = ${40 + i * 28}; __pbGame.dropNow(); true`);
+      await sleep(90);
+    }
+    const stage2 = await evalJs('({stage: __pbGame.stage, drops: __pbGame.totalDrops, interval: __pbGame.interval, danger: __pbGame.dangerMs, running: __pbGame.running})');
+    console.log('    第 1 关 ' + stage1.interval + 'ms → 第 2 关 ' + stage2.interval + 'ms');
+    ok('落满 10 球进入第 2 关', stage2.stage === 2, '现在第 ' + stage2.stage + ' 关');
+    ok('第 2 关间隔比第 1 关短', stage2.interval < stage1.interval,
+      stage1.interval + ' → ' + stage2.interval);
+    ok('第 2 关判负更严格', stage2.danger < stage1.danger,
+      stage1.danger + 'ms → ' + stage2.danger + 'ms');
+
+    // 再落 20 球推进到第 4 关，验证难度表持续生效
+    for (let i = 0; i < 20; i++) {
+      await evalJs(`__pbGame.aim = ${40 + (i % 9) * 35}; __pbGame.dropNow(); true`);
+      await sleep(90);
+    }
+    const stage3 = await evalJs('({stage: __pbGame.stage, interval: __pbGame.interval, running: __pbGame.running})');
+    console.log('    落球 30 次后：第 ' + stage3.stage + ' 关，间隔 ' + stage3.interval + 'ms');
+    ok('关卡按落球数继续推进', stage3.stage >= 3, '第 ' + stage3.stage + ' 关');
+    ok('间隔继续缩短', stage3.interval < stage2.interval, stage3.interval + 'ms');
+
+    const table = await evalJs('window.__pbGame.stages');
+    const monotonic = table.every((s, i) => i === 0 || s.dropMs <= table[i - 1].dropMs);
+    ok('难度表单调不回升', monotonic);
+    const fastest = Math.min(...table.map((s) => s.dropMs));
+    ok('最低间隔不低于 470ms 安全线', fastest >= 470, '最低 ' + fastest + 'ms');
+    const tightest = Math.min(...table.map((s) => s.dangerMs));
+    ok('判负宽限不低于 1050ms', tightest >= 1050, '最低 ' + tightest + 'ms');
+
+    console.log('\n【4】合成与计分');
+    await evalJs('window.__pbGame.setAuto(false); true');
+    await evalJs('window.__pbGame.drop(16); true');
+    await sleep(8000);
+
+    const state = await evalJs('({ score: window.__pbGame.score, balls: window.__pbGame.balls, running: window.__pbGame.running, token: window.__pbGame.token, stage: window.__pbGame.stage })');
+    console.log('    分数=' + state.score + '  场上球数=' + state.balls + '  关卡=' + state.stage + '  进行中=' + state.running);
     ok('产生了合成得分', state.score > 0, '得分 ' + state.score);
     ok('场上留下了球', state.balls > 0, state.balls + ' 个');
     ok('拿到了对局凭证', state.token.length > 20);
@@ -209,7 +262,7 @@ async function main() {
     ok('移动端没有横向溢出', overflow,
       'scrollWidth=' + await evalJs('document.documentElement.scrollWidth'));
 
-    console.log('\n【3】结束并提交成绩');
+    console.log('\n【5】结束并提交成绩');
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 1440, height: 900, deviceScaleFactor: 1, mobile: false
     });
@@ -218,14 +271,14 @@ async function main() {
 
     const note = await evalJs('document.getElementById("overNote").textContent');
     console.log('    提交结果：' + note);
-    ok('成绩提交成功', /已记录|新纪录|最高分/.test(note), note);
+    ok('成绩提交成功', /已保存|已记录|新纪录|最高分/.test(note), note);
     ok('结束遮罩已显示', await evalJs('!document.getElementById("gameOver").hidden'));
 
     shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(path.join(OUT, 'game-over.png'), Buffer.from(shot.data, 'base64'));
     console.log('    ✓ 截图 game-over.png');
 
-    console.log('\n【4】排行榜');
+    console.log('\n【6】排行榜');
     const rankRows = await evalJs('document.querySelectorAll("#rankBody tr").length');
     const rankFirst = await evalJs('document.querySelector("#rankBody tr td.rank-name")?.textContent || ""');
     ok('榜单出现记录', rankRows >= 1, rankRows + ' 行，第一行：' + rankFirst);

@@ -14,3 +14,4 @@ demo-data/
 .DS_Store
 node_modules/
 .shots/
+.balance-data/

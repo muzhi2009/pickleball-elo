@@ -10,7 +10,8 @@
     "seed": "node tools/seed.js",
     "test": "node tools/run-tests.js",
     "shots": "node tools/screenshot.js",
-    "game": "node tools/game-test.js"
+    "game": "node tools/game-test.js",
+    "balance": "node tools/game-balance.js"
   },
   "engines": {
     "node": ">=20"

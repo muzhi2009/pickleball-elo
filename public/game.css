@@ -57,6 +57,31 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 关卡：数字下面挂一条本关进度 */
+.stat-stage {
+  min-width: 74px;
+}
+
+.stage-track {
+  display: block;
+  width: 100%;
+  height: 4px;
+  margin-top: 6px;
+  border-radius: 2px;
+  /* 轨道要比胶囊底色明显深一档，否则只剩填充可见，看着像条下划线 */
+  background: color-mix(in srgb, var(--fg) 20%, transparent);
+  overflow: hidden;
+}
+
+.stage-track b {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--fg);
+  transition: width 0.22s ease-out;
+}
+
 .board-shell {
   position: relative;
   border: 1.5px solid var(--line);
@@ -345,8 +370,9 @@
   .game-head h1 { font-size: 1.2rem; }
 
   .board-shell {
-    /* 手机竖屏基本吃满宽度，但要给视口高度留余量，横屏时不至于超出 */
-    max-width: min(420px, calc((100dvh - 268px) * 360 / 560));
+    /* 手机竖屏基本吃满宽度，但要给视口高度留余量，横屏时不至于超出。
+       标题与数据块在窄屏会拆成两行，比桌面多占约 34px。 */
+    max-width: min(420px, calc((100dvh - 300px) * 360 / 560));
     margin: 0 auto;
     width: 100%;
   }
@@ -362,4 +388,24 @@
   .stat-pill { min-width: 58px; padding: 2px 8px 3px; }
   .stat-pill strong { font-size: 0.95rem; }
   .game-head h1 { font-size: 1.05rem; }
+}
+
+/* 窄屏：标题独占一行，三个数据块平分下面一行，避免互相挤压 */
+@media (max-width: 540px) {
+  .game-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .game-stats {
+    gap: 6px;
+  }
+
+  .stat-pill {
+    flex: 1 1 0;
+    min-width: 0;
+    align-items: flex-start;
+    padding: 3px 9px 4px;
+  }
 }
